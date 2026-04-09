@@ -1,0 +1,271 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ═══════════════════════════════════════════════════════════════
+    // HELPER FUNCTIONS
+    // ═══════════════════════════════════════════════════════════════
+
+    // Is the request from a signed-in user?
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    // Is the request from this specific user?
+    function isOwner(uid) {
+      return isAuth() && request.auth.uid == uid;
+    }
+
+    // Does the user's Firestore profile say they are not banned?
+    function isNotBanned() {
+      return isAuth() &&
+        !exists(/databases/$(database)/documents/users/$(request.auth.uid)) ||
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isBanned == false;
+    }
+
+    // Has the user completed profile setup?
+    function profileComplete() {
+      return isAuth() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.profileComplete == true;
+    }
+
+    // Is this user a participant in this match?
+    function isMatchParticipant(matchId) {
+      return isAuth() &&
+        exists(/databases/$(database)/documents/matches/$(matchId)) &&
+        request.auth.uid in get(/databases/$(database)/documents/matches/$(matchId)).data.users;
+    }
+
+    // Coin amount validation: positive number, max single tx = 50,000
+    function validCoinAmount(amount) {
+      return amount is int && amount > 0 && amount <= 50000;
+    }
+
+    // String field within length limit
+    function withinLength(field, max) {
+      return field is string && field.size() <= max;
+    }
+
+    // Allowed update fields only (prevent field injection)
+    function onlyFields(allowed) {
+      return request.resource.data.keys().hasOnly(allowed);
+    }
+
+
+    // ═══════════════════════════════════════════════════════════════
+    // /users/{uid}
+    // ═══════════════════════════════════════════════════════════════
+    match /users/{uid} {
+
+      // Any authenticated, non-banned user can read basic profiles
+      // (for discover/swipe cards). Sensitive fields stripped via
+      // Cloud Function / client-side field filtering.
+      allow read: if isAuth() && isNotBanned();
+
+      // Create: only the authenticated user can create their own doc,
+      // and only via the server (Cloud Function or ensureUserDocument).
+      // Direct client writes allowed only for first-time setup.
+      allow create: if isOwner(uid)
+        && request.resource.data.uid == uid
+        && request.resource.data.isBanned == false
+        && request.resource.data.isVerified == false
+        && request.resource.data.coins is int;
+
+      // Update: owner can update only safe profile fields.
+      // Sensitive fields (coins, isBanned, isVerified) are read-only from client.
+      allow update: if isOwner(uid)
+        && onlyFields([
+            "displayName","bio","occupation","age","gender","lookingFor",
+            "intentions","hobbies","photoURL","photos","callRateVoice",
+            "callRateVideo","photoPrice","videoPrice","profileComplete",
+            "setupStep","updatedAt","lastActiveAt"
+          ])
+        && withinLength(request.resource.data.bio, 150)
+        && request.resource.data.age >= 18
+        && request.resource.data.age <= 80
+        && request.resource.data.photos.size() <= 6;
+
+      // Nobody can delete a user doc from the client
+      allow delete: if false;
+    }
+
+
+    // ═══════════════════════════════════════════════════════════════
+    // /wallets/{uid}  — coin balance source of truth
+    // ═══════════════════════════════════════════════════════════════
+    match /wallets/{uid} {
+
+      // Owner can read their own wallet
+      allow read: if isOwner(uid);
+
+      // Only Cloud Functions write to wallets (all coin mutations go
+      // through server-side logic to enforce the 60/40 split).
+      // Direct client writes are forbidden.
+      allow write: if false;
+
+      // /wallets/{uid}/transactions/{txId}
+      match /transactions/{txId} {
+        // Owner reads their own transaction history
+        allow read: if isOwner(uid);
+
+        // No client writes — Cloud Functions only
+        allow write: if false;
+      }
+    }
+
+
+    // ═══════════════════════════════════════════════════════════════
+    // /swipes/{uid}/decisions/{targetUid}
+    // ═══════════════════════════════════════════════════════════════
+    match /swipes/{uid}/decisions/{targetUid} {
+
+      // Users can read their own swipe decisions
+      allow read: if isOwner(uid);
+
+      // Users can create/overwrite their own swipe decisions
+      allow create, update: if isOwner(uid)
+        && isNotBanned()
+        && profileComplete()
+        && request.resource.data.uid == uid
+        && request.resource.data.targetUid == targetUid
+        && request.resource.data.decision in ["like","pass","superlike"];
+
+      allow delete: if false;
+    }
+
+
+    // ═══════════════════════════════════════════════════════════════
+    // /matches/{matchId}
+    // ═══════════════════════════════════════════════════════════════
+    match /matches/{matchId} {
+
+      // Only participants can read the match
+      allow read: if isMatchParticipant(matchId);
+
+      // Matches are created by Cloud Function (on mutual like)
+      allow create: if false;
+
+      // Participants can update limited fields (e.g. mark read)
+      allow update: if isMatchParticipant(matchId)
+        && onlyFields(["unreadCount","lastMessage","lastMessageAt","lastMessageBy"]);
+
+      allow delete: if false;
+
+      // /matches/{matchId}/messages/{msgId}
+      match /messages/{msgId} {
+        allow read: if isMatchParticipant(matchId);
+
+        // Sender can create messages; type must be valid
+        allow create: if isMatchParticipant(matchId)
+          && isNotBanned()
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.type in ["text","coinTx","mediaRequest","callLog"]
+          && (request.resource.data.type != "text"
+              || withinLength(request.resource.data.text, 1000));
+
+        // No editing messages
+        allow update, delete: if false;
+      }
+    }
+
+
+    // ═══════════════════════════════════════════════════════════════
+    // /calls/{callId}
+    // ═══════════════════════════════════════════════════════════════
+    match /calls/{callId} {
+
+      // Both caller and receiver can read
+      allow read: if isAuth()
+        && (request.auth.uid == resource.data.callerId
+            || request.auth.uid == resource.data.receiverId);
+
+      // Calls are created by Cloud Function
+      allow create: if false;
+
+      // Caller/receiver can update status fields only
+      allow update: if isAuth()
+        && (request.auth.uid == resource.data.callerId
+            || request.auth.uid == resource.data.receiverId)
+        && onlyFields(["status","startedAt","endedAt","duration"]);
+
+      allow delete: if false;
+    }
+
+
+    // ═══════════════════════════════════════════════════════════════
+    // /media/{mediaId}
+    // ═══════════════════════════════════════════════════════════════
+    match /media/{mediaId} {
+
+      // Owner or requester can read
+      allow read: if isAuth()
+        && (request.auth.uid == resource.data.ownerId
+            || request.auth.uid == resource.data.requesterId);
+
+      // Media requests created by requester
+      allow create: if isAuth()
+        && isNotBanned()
+        && profileComplete()
+        && request.resource.data.requesterId == request.auth.uid
+        && request.resource.data.status == "pending"
+        && validCoinAmount(request.resource.data.price);
+
+      // Owner updates (accept/reject), no coin fields touched from client
+      allow update: if isAuth()
+        && request.auth.uid == resource.data.ownerId
+        && onlyFields(["status","storagePath"])
+        && request.resource.data.status in ["purchased","rejected"];
+
+      allow delete: if false;
+    }
+
+
+    // ═══════════════════════════════════════════════════════════════
+    // /upiTransactions/{txId}
+    // ═══════════════════════════════════════════════════════════════
+    match /upiTransactions/{txId} {
+
+      // Owner can read their own UPI transactions
+      allow read: if isAuth() && resource.data.uid == request.auth.uid;
+
+      // Client can initiate (create) a pending UPI transaction
+      allow create: if isAuth()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.status == "pending"
+        && request.resource.data.amountINR > 0
+        && request.resource.data.amountINR <= 100000;
+
+      // Only Cloud Functions update (mark success/failed after gateway webhook)
+      allow update, delete: if false;
+    }
+
+
+    // ═══════════════════════════════════════════════════════════════
+    // /reports/{reportId}
+    // ═══════════════════════════════════════════════════════════════
+    match /reports/{reportId} {
+
+      // Reporter can read their own report
+      allow read: if isAuth() && resource.data.reporterId == request.auth.uid;
+
+      // Any authenticated user can file a report
+      allow create: if isAuth()
+        && isNotBanned()
+        && request.resource.data.reporterId == request.auth.uid
+        && withinLength(request.resource.data.reason, 500)
+        && request.resource.data.status == "open";
+
+      // No client updates/deletes on reports
+      allow update, delete: if false;
+    }
+
+
+    // ═══════════════════════════════════════════════════════════════
+    // Catch-all: deny everything not explicitly allowed
+    // ═══════════════════════════════════════════════════════════════
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

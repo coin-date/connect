@@ -1,0 +1,66 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "users",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "profileComplete", "order": "ASCENDING" },
+        { "fieldPath": "isActive",        "order": "ASCENDING" },
+        { "fieldPath": "isBanned",        "order": "ASCENDING" },
+        { "fieldPath": "gender",          "order": "ASCENDING" },
+        { "fieldPath": "lastActiveAt",    "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "matches",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "users",         "arrayConfig": "CONTAINS" },
+        { "fieldPath": "active",        "order": "ASCENDING" },
+        { "fieldPath": "lastMessageAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "messages",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        { "fieldPath": "timestamp", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "transactions",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        { "fieldPath": "uid",       "order": "ASCENDING" },
+        { "fieldPath": "timestamp", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "upiTransactions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "gatewayOrderId", "order": "ASCENDING" },
+        { "fieldPath": "status",         "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "upiTransactions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "uid",       "order": "ASCENDING" },
+        { "fieldPath": "direction", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": [
+    {
+      "collectionGroup": "users",
+      "fieldPath": "isBanned",
+      "indexes": [
+        { "order": "ASCENDING",  "queryScope": "COLLECTION" },
+        { "order": "DESCENDING", "queryScope": "COLLECTION" }
+      ]
+    }
+  ]
+}
