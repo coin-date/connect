@@ -1,0 +1,63 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // ── Helpers ────────────────────────────────────────────────────
+    function isAuth()       { return request.auth != null; }
+    function isOwner(uid)   { return isAuth() && request.auth.uid == uid; }
+
+    // Max file sizes
+    function maxPhotoSize() { return 5 * 1024 * 1024; }   // 5 MB
+    function maxVideoSize() { return 50 * 1024 * 1024; }  // 50 MB
+
+    // Allowed image content types
+    function isImage() {
+      return request.resource.contentType.matches('image/(jpeg|jpg|png|webp)');
+    }
+    function isVideo() {
+      return request.resource.contentType.matches('video/(mp4|quicktime|webm)');
+    }
+
+    // ── Profile Photos: /profilePhotos/{uid}/{filename} ────────────
+    // Users upload their own profile images (live-camera requirement
+    // is enforced in the app; here we enforce type + size).
+    match /profilePhotos/{uid}/{filename} {
+      allow read:  if isAuth();                          // any logged-in user can view profiles
+      allow write: if isOwner(uid)
+        && isImage()
+        && request.resource.size <= maxPhotoSize();
+      allow delete: if isOwner(uid);
+    }
+
+    // ── Paid Media: /paidMedia/{ownerId}/{mediaId} ─────────────────
+    // Only the owner uploads. Only approved requester can read
+    // (enforced by checking the /media Firestore doc via a Cloud Function
+    //  that mints a short-lived signed URL after purchase).
+    // Direct read from Storage is blocked — always serve via signed URL.
+    match /paidMedia/{ownerId}/{mediaId} {
+      allow read:  if false;                             // served via signed URL only
+      allow write: if isOwner(ownerId)
+        && (isImage() || isVideo())
+        && (isImage()
+              ? request.resource.size <= maxPhotoSize()
+              : request.resource.size <= maxVideoSize());
+      allow delete: if isOwner(ownerId);
+    }
+
+    // ── Story Media: /stories/{uid}/{storyId} ─────────────────────
+    match /stories/{uid}/{storyId} {
+      allow read:  if isAuth();
+      allow write: if isOwner(uid)
+        && (isImage() || isVideo())
+        && (isImage()
+              ? request.resource.size <= maxPhotoSize()
+              : request.resource.size <= 30 * 1024 * 1024);  // 30 MB for stories
+      allow delete: if isOwner(uid);
+    }
+
+    // ── Deny everything else ──────────────────────────────────────
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
